@@ -1,0 +1,237 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>Birdnode · remote microphone</title>
+<style>
+  :root{ --green:#2f4a2a; --leaf:#3aa655; }
+  *{ box-sizing:border-box; }
+  body{ font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif; margin:0;
+        background:#10210d; color:#eaf3e6; min-height:100vh;
+        display:flex; flex-direction:column; align-items:center; padding:24px 16px; }
+  h1{ font-size:1.4rem; margin:.2rem 0; }
+  .muted{ color:#9fb596; font-size:.85rem; }
+  .card{ background:#16300f; border:1px solid #2c4a22; border-radius:16px;
+         padding:20px; max-width:420px; width:100%; margin-top:14px; }
+  .big{ font-size:1.05rem; font-weight:700; }
+  .dot{ display:inline-block; width:11px; height:11px; border-radius:50%;
+        background:#c0392b; margin-right:8px; vertical-align:middle; }
+  .dot.on{ background:var(--leaf); }
+  button{ width:100%; padding:14px; font-size:1.05rem; font-weight:700; border:none;
+          border-radius:12px; background:var(--leaf); color:#06140a; margin-top:14px; }
+  button:disabled{ opacity:.5; }
+  .meter{ height:10px; background:#0c1c08; border-radius:6px; overflow:hidden; margin-top:12px; }
+  .meter > div{ height:100%; width:0%; background:linear-gradient(90deg,#3aa655,#a6e07f); transition:width .08s; }
+  .dets{ list-style:none; padding:0; margin:10px 0 0; }
+  .dets li{ padding:8px 0; border-bottom:1px dashed #2c4a22; }
+  .dets .sci{ color:#9fb596; font-size:.8rem; font-style:italic; }
+  .err{ color:#ffb4a8; }
+  svg.kite{ display:block; margin:0 auto 6px; }
+</style>
+</head>
+<body>
+  <svg class="kite" width="64" height="64" viewBox="0 0 100 100" aria-hidden="true">
+    <polygon points="50,6 92,50 50,72 8,50" fill="#3aa655" opacity=".25"/>
+    <polygon points="50,6 92,50 50,72 8,50" fill="none" stroke="#a6e07f" stroke-width="3"/>
+    <line x1="50" y1="72" x2="50" y2="96" stroke="#a6e07f" stroke-width="2"/>
+  </svg>
+  <h1>Birdnode</h1>
+  <p class="muted">This phone becomes a remote microphone for a Birdy hub.</p>
+
+  <div class="card">
+    <p class="big"><span id="dot" class="dot"></span><span id="state">tap to connect</span></p>
+    <p class="muted" id="node-id">—</p>
+    <button id="start">Start listening</button>
+    <div class="meter"><div id="level"></div></div>
+    <p class="muted" id="hint" style="margin-top:12px;">
+      Keep this tab open and the screen awake. Plug the phone in for long sessions.
+    </p>
+    <p class="err" id="error"></p>
+  </div>
+
+  <div class="card">
+    <p class="muted" style="margin:0 0 4px;">Recent detections (from the hub)</p>
+    <ul id="dets" class="dets"></ul>
+  </div>
+
+<script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<script>
+"use strict";
+const PROTOCOL = "rapp-neighborhood-5a/1";
+const PBKDF2_SALT = new TextEncoder().encode("rapp-neighborhood-5a/1");
+const PBKDF2_ITERS = 210000;
+const WINDOW_S = 3.0;
+const STRIDE_S = 1.5;
+
+// ---- read pairing fragment (#p=peerId&s=secret&b=broker) ----
+const frag = new URLSearchParams((location.hash || "").replace(/^#/, ""));
+const HUB_PEER = frag.get("p");
+const SECRET = frag.get("s");
+const BROKER = frag.get("b") || "0.peerjs.com";
+
+// stable per-device node id
+let NODE_ID = localStorage.getItem("birdnode_id");
+if(!NODE_ID){
+  const r = crypto.getRandomValues(new Uint8Array(4));
+  NODE_ID = "phone-" + Array.from(r).map(x=>x.toString(16).padStart(2,"0")).join("");
+  localStorage.setItem("birdnode_id", NODE_ID);
+}
+document.getElementById("node-id").textContent = NODE_ID;
+
+const b64 = {
+  enc(buf){ let s=""; const b=new Uint8Array(buf); for(let i=0;i<b.length;i++) s+=String.fromCharCode(b[i]); return btoa(s); },
+  dec(str){ const s=atob(str); const b=new Uint8Array(s.length); for(let i=0;i<s.length;i++) b[i]=s.charCodeAt(i); return b; },
+};
+function setState(txt, on){ document.getElementById("state").textContent=txt;
+  document.getElementById("dot").classList.toggle("on", !!on); }
+function showError(msg){ document.getElementById("error").textContent = msg || ""; }
+
+// ---- sealed channel (mirrors the hub) ----
+async function deriveKey(secret){
+  const base = await crypto.subtle.importKey("raw", new TextEncoder().encode(secret),
+    "PBKDF2", false, ["deriveKey"]);
+  return crypto.subtle.deriveKey(
+    { name:"PBKDF2", salt:PBKDF2_SALT, iterations:PBKDF2_ITERS, hash:"SHA-256" },
+    base, { name:"AES-GCM", length:256 }, false, ["encrypt","decrypt"]);
+}
+function aad(hdr){ return new TextEncoder().encode(
+  JSON.stringify({v:hdr.v, dir:hdr.dir, node:hdr.node, seq:hdr.seq, kind:hdr.kind})); }
+async function seal(key, hdr, payloadObj){
+  const nonce = crypto.getRandomValues(new Uint8Array(12));
+  const pt = new TextEncoder().encode(JSON.stringify(payloadObj));
+  const ct = await crypto.subtle.encrypt(
+    { name:"AES-GCM", iv:nonce, additionalData:aad(hdr) }, key, pt);
+  return JSON.stringify({ ...hdr, nonce:b64.enc(nonce), ct:b64.enc(ct) });
+}
+async function unseal(key, wire, expectDir, seqGuard){
+  const env = JSON.parse(wire);
+  if(env.v !== PROTOCOL) throw new Error("bad protocol");
+  if(env.dir !== expectDir) throw new Error("bad direction");
+  const last = seqGuard.last ?? -1;
+  if(typeof env.seq !== "number" || env.seq <= last) throw new Error("replay/old seq");
+  const hdr = {v:env.v, dir:env.dir, node:env.node, seq:env.seq, kind:env.kind};
+  const pt = await crypto.subtle.decrypt(
+    { name:"AES-GCM", iv:b64.dec(env.nonce), additionalData:aad(hdr) }, key, b64.dec(env.ct));
+  seqGuard.last = env.seq;
+  return { kind:env.kind, payload: JSON.parse(new TextDecoder().decode(pt)) };
+}
+
+function f32ToPcm16(f32){
+  const out = new Int16Array(f32.length);
+  for(let i=0;i<f32.length;i++){ let s=Math.max(-1,Math.min(1,f32[i])); out[i]=s<0?s*32768:s*32767; }
+  return out;
+}
+
+// inline AudioWorklet processor (so this file is self-contained for static hosting)
+const WORKLET_SRC = `
+class Cap extends AudioWorkletProcessor {
+  constructor(){ super(); this.buf=[]; this.count=0; }
+  process(inputs){
+    const ch = inputs[0][0];
+    if(ch){ this.buf.push(new Float32Array(ch)); this.count+=ch.length;
+      if(this.count>=4096){ this.port.postMessage(this.buf); this.buf=[]; this.count=0; } }
+    return true;
+  }
+}
+registerProcessor('cap', Cap);
+`;
+
+let KEY=null, peer=null, conn=null, audioCtx=null, sendSeq=0;
+const recvGuard = { last:-1 };
+
+async function connectPeer(){
+  return new Promise((resolve,reject)=>{
+    peer = new Peer(undefined, { host:BROKER, secure:true, port:443 });
+    peer.on("open", ()=>{
+      conn = peer.connect(HUB_PEER, { reliable:true });
+      conn.on("open", ()=>{ setState("connected", true); resolve(); });
+      conn.on("data", async wire=>{
+        try{ const m = await unseal(KEY, wire, "h2n", recvGuard);
+          if(m.kind==="result") renderDets(m.payload.recent||[]);
+        }catch(e){ /* drop */ }
+      });
+      conn.on("close", ()=>setState("disconnected", false));
+      conn.on("error", e=>showError("channel error: "+e));
+    });
+    peer.on("error", e=>{
+      if(e.type==="peer-unavailable" || e.type==="network" || e.type==="server-error")
+        showError("Couldn't connect directly to the hub. Some mobile networks block "+
+                  "peer-to-peer audio; try Wi-Fi.");
+      reject(e);
+    });
+  });
+}
+
+let ring = new Float32Array(0);
+let captureRate = 48000;
+function pushSamples(chunks){
+  let total=0; for(const c of chunks) total+=c.length;
+  const merged = new Float32Array(ring.length+total);
+  merged.set(ring,0); let off=ring.length;
+  for(const c of chunks){ merged.set(c,off); off+=c.length; }
+  const maxKeep = Math.ceil(captureRate*(WINDOW_S+1));
+  ring = merged.length>maxKeep ? merged.slice(merged.length-maxKeep) : merged;
+}
+async function emitWindow(){
+  const need = Math.floor(captureRate*WINDOW_S);
+  if(ring.length<need || !conn || !conn.open) return;
+  const win = ring.slice(ring.length-need);
+  const pcm = f32ToPcm16(win);
+  const hdr = { v:PROTOCOL, dir:"n2h", node:NODE_ID, seq:sendSeq++, kind:"audio" };
+  try{
+    conn.send(await seal(KEY, hdr, {
+      sample_rate: Math.round(captureRate),
+      captured_at_utc: new Date().toISOString(),
+      pcm_b64: b64.enc(pcm.buffer),
+    }));
+  }catch(e){ showError("send error: "+e); }
+}
+
+function renderDets(list){
+  const ul=document.getElementById("dets"); ul.innerHTML="";
+  for(const d of list){
+    const li=document.createElement("li");
+    li.innerHTML = `<div><strong>${d.common_name||d.scientific_name}</strong> · `+
+      `${Math.round((d.confidence||0)*100)}%</div><div class="sci">${d.scientific_name||""}</div>`;
+    ul.appendChild(li);
+  }
+}
+
+async function start(){
+  showError("");
+  if(!window.isSecureContext){ showError("This page must be served over HTTPS to use the microphone."); return; }
+  if(!HUB_PEER || !SECRET){ showError("Missing pairing info — scan the hub's QR code again."); return; }
+  document.getElementById("start").disabled = true;
+  try{
+    KEY = await deriveKey(SECRET);
+    setState("connecting…", false);
+    await connectPeer();
+    const stream = await navigator.mediaDevices.getUserMedia({ audio:{ echoCancellation:false, noiseSuppression:false, autoGainControl:false } });
+    audioCtx = new (window.AudioContext||window.webkitAudioContext)();
+    captureRate = audioCtx.sampleRate;
+    const blobUrl = URL.createObjectURL(new Blob([WORKLET_SRC], {type:"application/javascript"}));
+    await audioCtx.audioWorklet.addModule(blobUrl);
+    const src = audioCtx.createMediaStreamSource(stream);
+    const node = new AudioWorkletNode(audioCtx, "cap");
+    node.port.onmessage = (e)=>{
+      pushSamples(e.data);
+      let peak=0; for(const c of e.data) for(let i=0;i<c.length;i++){ const a=Math.abs(c[i]); if(a>peak) peak=a; }
+      document.getElementById("level").style.width = Math.min(100, peak*140).toFixed(0)+"%";
+    };
+    src.connect(node);
+    setInterval(emitWindow, STRIDE_S*1000);
+    setState("listening", true);
+    try{ if("wakeLock" in navigator) await navigator.wakeLock.request("screen"); }catch(_){}
+  }catch(e){
+    showError(""+(e.message||e));
+    setState("error", false);
+    document.getElementById("start").disabled = false;
+  }
+}
+document.getElementById("start").addEventListener("click", start);
+if(!HUB_PEER || !SECRET) setState("scan the hub QR to pair", false);
+</script>
+</body>
+</html>
