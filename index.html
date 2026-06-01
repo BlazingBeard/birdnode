@@ -97,7 +97,7 @@ const STRIDE_S = 1.5;
 // Capture gain ("sensitivity"). tanh soft-clips loud peaks instead of harshly
 // clipping, so quiet birdsong gets a clean ~MIC_GAIN× lift without distortion.
 // Adjustable live from the phone via the +/- sensitivity buttons.
-const GAIN_MIN = 0.6, GAIN_MAX = 6.0, GAIN_STEP = 0.4;
+const GAIN_MIN = 0.6, GAIN_MAX = 8.0, GAIN_STEP = 0.4;
 let MIC_GAIN = parseFloat(localStorage.getItem("birdnode_gain"));
 if(!Number.isFinite(MIC_GAIN)) MIC_GAIN = 1.6;
 function clampGain(g){ return Math.min(GAIN_MAX, Math.max(GAIN_MIN, Math.round(g*10)/10)); }
@@ -286,7 +286,10 @@ async function start(){
     node.port.onmessage = (e)=>{
       pushSamples(e.data);
       let peak=0; for(const c of e.data) for(let i=0;i<c.length;i++){ const a=Math.abs(c[i]); if(a>peak) peak=a; }
-      document.getElementById("level").style.width = Math.min(100, peak*140).toFixed(0)+"%";
+      // Show the level AFTER sensitivity is applied (same tanh as f32ToPcm16) so
+      // turning sensitivity up visibly moves the bar — that's the live feedback.
+      const shown = Math.tanh(peak*MIC_GAIN);
+      document.getElementById("level").style.width = Math.min(100, shown*100).toFixed(0)+"%";
     };
     src.connect(node);
     setInterval(emitWindow, STRIDE_S*1000);
