@@ -27,6 +27,13 @@
   input.name::placeholder{ color:#6f8a66; }
   .meter{ height:10px; background:#0c1c08; border-radius:6px; overflow:hidden; margin-top:12px; }
   .meter > div{ height:100%; width:0%; background:linear-gradient(90deg,#3aa655,#a6e07f); transition:width .08s; }
+  .sens{ display:flex; align-items:center; justify-content:space-between; gap:10px; margin-top:16px; }
+  .sens .sens-lbl{ font-size:.8rem; color:#9fb596; }
+  .sens-ctl{ display:flex; align-items:center; gap:12px; }
+  .sens-val{ min-width:52px; text-align:center; font-weight:700; font-size:1.05rem; }
+  .sbtn{ width:48px; height:48px; margin-top:0; padding:0; font-size:1.5rem; line-height:1;
+         border-radius:12px; background:#244a1a; color:#eaf3e6; }
+  .sbtn:disabled{ opacity:.35; }
   .dets{ list-style:none; padding:0; margin:10px 0 0; }
   .dets li{ padding:8px 0; border-bottom:1px dashed #2c4a22; }
   .dets .sci{ color:#9fb596; font-size:.8rem; font-style:italic; }
@@ -60,6 +67,14 @@
            placeholder="e.g. Back porch">
     <button id="start">Start listening</button>
     <div class="meter"><div id="level"></div></div>
+    <div class="sens" id="sens">
+      <span class="sens-lbl">Sensitivity<br><span class="sens-lbl" id="sens-hint" style="font-size:.72rem;">louder = hears quieter birds</span></span>
+      <div class="sens-ctl">
+        <button type="button" id="sens-down" class="sbtn" aria-label="Lower sensitivity">−</button>
+        <span id="sens-val" class="sens-val">1.6×</span>
+        <button type="button" id="sens-up" class="sbtn" aria-label="Raise sensitivity">+</button>
+      </div>
+    </div>
     <p class="muted" id="hint" style="margin-top:12px;">
       Keep this tab open and the screen awake. Plug the phone in for long sessions.
     </p>
@@ -79,9 +94,14 @@ const PBKDF2_SALT = new TextEncoder().encode("rapp-neighborhood-5a/1");
 const PBKDF2_ITERS = 210000;
 const WINDOW_S = 3.0;
 const STRIDE_S = 1.5;
-// Modest capture gain. tanh soft-clips loud peaks instead of harshly clipping,
-// so quiet birdsong gets a clean ~MIC_GAIN× lift without adding distortion.
-const MIC_GAIN = 1.6;
+// Capture gain ("sensitivity"). tanh soft-clips loud peaks instead of harshly
+// clipping, so quiet birdsong gets a clean ~MIC_GAIN× lift without distortion.
+// Adjustable live from the phone via the +/- sensitivity buttons.
+const GAIN_MIN = 0.6, GAIN_MAX = 6.0, GAIN_STEP = 0.4;
+let MIC_GAIN = parseFloat(localStorage.getItem("birdnode_gain"));
+if(!Number.isFinite(MIC_GAIN)) MIC_GAIN = 1.6;
+function clampGain(g){ return Math.min(GAIN_MAX, Math.max(GAIN_MIN, Math.round(g*10)/10)); }
+MIC_GAIN = clampGain(MIC_GAIN);
 
 // ---- read pairing fragment (#p=peerId&s=secret&b=broker) ----
 const frag = new URLSearchParams((location.hash || "").replace(/^#/, ""));
@@ -109,6 +129,21 @@ function refreshNodeId(){
 }
 nameInput.addEventListener("input", refreshNodeId);
 refreshNodeId();
+
+// ---- sensitivity (mic gain) control ----
+function renderGain(){
+  document.getElementById("sens-val").textContent = MIC_GAIN.toFixed(1) + "×";
+  document.getElementById("sens-down").disabled = MIC_GAIN <= GAIN_MIN + 1e-9;
+  document.getElementById("sens-up").disabled = MIC_GAIN >= GAIN_MAX - 1e-9;
+}
+function setGain(g){
+  MIC_GAIN = clampGain(g);
+  localStorage.setItem("birdnode_gain", String(MIC_GAIN));
+  renderGain();
+}
+document.getElementById("sens-up").addEventListener("click", ()=> setGain(MIC_GAIN + GAIN_STEP));
+document.getElementById("sens-down").addEventListener("click", ()=> setGain(MIC_GAIN - GAIN_STEP));
+renderGain();
 
 const b64 = {
   enc(buf){ let s=""; const b=new Uint8Array(buf); for(let i=0;i<b.length;i++) s+=String.fromCharCode(b[i]); return btoa(s); },
