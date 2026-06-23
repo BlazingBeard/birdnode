@@ -90,13 +90,17 @@
 <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
 <script>
 "use strict";
-// ---- on-screen debug + crash capture (phone failures must never be silent) ----
+// ---- debug log + crash capture (failures must never be silent) ----
+// The verbose log box only shows when the page URL contains "debug" (e.g.
+// ?debug or #debug); real crashes always surface as a normal on-screen error.
+const DEBUG = /(?:[?#&])debug\b/i.test(location.href);
 function dbg(m){
-  try{ const el=document.getElementById('dbg'); if(el){ el.style.display='block'; el.textContent += m+"\n"; } }catch(_){}
+  try{ const el=document.getElementById('dbg'); if(el && DEBUG){ el.style.display='block'; el.textContent += m+"\n"; } }catch(_){}
   try{ console.log("[birdnode] "+m); }catch(_){}
 }
-window.addEventListener('error', e=>dbg("⚠ JS error: "+(e.message||e.error||e)+(e.lineno?(" @line "+e.lineno):"")));
-window.addEventListener('unhandledrejection', e=>dbg("⚠ rejected: "+((e.reason&&e.reason.message)||e.reason)));
+function crash(m){ dbg(m); try{ const el=document.getElementById('error'); if(el) el.textContent = m; }catch(_){} }
+window.addEventListener('error', e=>crash("⚠ "+(e.message||e.error||e)+(e.lineno?(" @line "+e.lineno):"")));
+window.addEventListener('unhandledrejection', e=>crash("⚠ "+((e.reason&&e.reason.message)||e.reason)));
 // Storage throws on some phones (private mode / blocked cookies); never let that
 // abort page setup, which would leave the Start button unwired and the tap dead.
 const LS = {
