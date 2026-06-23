@@ -206,25 +206,55 @@ registerProcessor('cap', Cap);
 let KEY=null, peer=null, conn=null, audioCtx=null, sendSeq=0;
 const recvGuard = { last:-1 };
 
+const CONNECT_TIMEOUT_MS = 15000;
 async function connectPeer(){
+  if(typeof Peer === "undefined"){
+    throw new Error("Couldn't load the connection library (peerjs). Check this "+
+                    "phone's internet connection and reload the page.");
+  }
   return new Promise((resolve,reject)=>{
+    let settled = false;
+    const finish = (fn, arg)=>{ if(settled) return; settled = true; clearTimeout(timer); fn(arg); };
+    // If the data channel never opens (broker reachable but the peer-to-peer link
+    // can't form — common with Wi-Fi "AP/client isolation" or strict NATs with no
+    // TURN server), PeerJS emits no error and would otherwise hang on "connecting…".
+    const timer = setTimeout(()=>{
+      try{ if(peer) peer.destroy(); }catch(_){}
+      finish(reject, new Error(
+        "Couldn't reach the hub (timed out). Make sure the hub's pairing page is "+
+        "still open, and that this phone and the computer are on the SAME Wi-Fi "+
+        "with client/AP isolation turned off. Then scan the QR again."));
+    }, CONNECT_TIMEOUT_MS);
+
     peer = new Peer(undefined, { host:BROKER, secure:true, port:443 });
     peer.on("open", ()=>{
       conn = peer.connect(HUB_PEER, { reliable:true });
-      conn.on("open", ()=>{ setState("connected", true); resolve(); });
+      conn.on("open", ()=>{ setState("connected", true); finish(resolve); });
       conn.on("data", async wire=>{
         try{ const m = await unseal(KEY, wire, "h2n", recvGuard);
           if(m.kind==="result") renderDets(m.payload.recent||[]);
         }catch(e){ /* drop */ }
       });
       conn.on("close", ()=>setState("disconnected", false));
-      conn.on("error", e=>showError("channel error: "+e));
+      conn.on("error", e=>{
+        const msg = "Connection to the hub failed: "+(e && e.type ? e.type : e);
+        showError(msg);
+        finish(reject, new Error(msg));
+      });
     });
     peer.on("error", e=>{
-      if(e.type==="peer-unavailable" || e.type==="network" || e.type==="server-error")
-        showError("Couldn't connect directly to the hub. Some mobile networks block "+
-                  "peer-to-peer audio; try Wi-Fi.");
-      reject(e);
+      const t = e && e.type;
+      let msg;
+      if(t==="peer-unavailable")
+        msg = "The hub isn't reachable. Open the hub's pairing page on the computer "+
+              "and scan its QR code again (each scan is single-use).";
+      else if(t==="network" || t==="server-error" || t==="socket-error" || t==="socket-closed")
+        msg = "Couldn't reach the pairing broker. Check this phone's internet "+
+              "connection, then scan the QR again.";
+      else
+        msg = "Connection error: "+(t || e);
+      showError(msg);
+      finish(reject, new Error(msg));
     });
   });
 }
