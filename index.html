@@ -332,6 +332,11 @@ async function start(){
     await connectPeer();
     const stream = await navigator.mediaDevices.getUserMedia({ audio:{ echoCancellation:false, noiseSuppression:false, autoGainControl:false } });
     audioCtx = new (window.AudioContext||window.webkitAudioContext)();
+    dbg("audioCtx created · state="+audioCtx.state+" · rate="+audioCtx.sampleRate);
+    // Mobile browsers start the context suspended (the await calls above drop the
+    // gesture activation); without resume() the worklet never runs → flat meter,
+    // no audio sent. Resume explicitly.
+    if(audioCtx.state !== "running"){ try{ await audioCtx.resume(); }catch(_){} dbg("audioCtx resumed · state="+audioCtx.state); }
     captureRate = audioCtx.sampleRate;
     const blobUrl = URL.createObjectURL(new Blob([WORKLET_SRC], {type:"application/javascript"}));
     await audioCtx.audioWorklet.addModule(blobUrl);
@@ -346,6 +351,12 @@ async function start(){
       document.getElementById("level").style.width = Math.min(100, shown*100).toFixed(0)+"%";
     };
     src.connect(node);
+    // Tie the worklet to the destination through a muted gain so the graph is
+    // actually pulled (some engines won't run a worklet with no path to output).
+    const sink = audioCtx.createGain(); sink.gain.value = 0;
+    node.connect(sink); sink.connect(audioCtx.destination);
+    if(audioCtx.state !== "running"){ try{ await audioCtx.resume(); }catch(_){} }
+    dbg("capture running · state="+audioCtx.state);
     setInterval(emitWindow, STRIDE_S*1000);
     setState("listening", true);
     document.body.classList.add("listening");
